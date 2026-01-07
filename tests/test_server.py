@@ -1,12 +1,15 @@
 """Tests for TCP server infrastructure."""
 
+import pytest
 from twisted.internet import protocol
 from twisted.mail import imap4
 
 from imap_granular_access_proxy.server import (
+    CommandTagTracker,
     IMAPServerFactory,
     IMAPServerProtocol,
     IMAPState,
+    PendingCommand,
 )
 
 
@@ -113,3 +116,160 @@ class TestIMAPServerFactory:
         proto = factory.buildProtocol(MockAddress())
         assert isinstance(proto, IMAPServerProtocol)
         assert proto.factory is factory
+
+
+class TestPendingCommand:
+    """Tests for PendingCommand dataclass."""
+
+    def test_creation_with_required_fields(self) -> None:
+        """PendingCommand should be creatable with required fields."""
+        cmd = PendingCommand(client_tag=b"A001", command="SELECT", args=b"INBOX")
+        assert cmd.client_tag == b"A001"
+        assert cmd.command == "SELECT"
+        assert cmd.args == b"INBOX"
+
+    def test_creation_with_none_args(self) -> None:
+        """PendingCommand should accept None for args."""
+        cmd = PendingCommand(client_tag=b"A002", command="NOOP", args=None)
+        assert cmd.args is None
+
+    def test_timestamp_is_set_automatically(self) -> None:
+        """PendingCommand should have timestamp set automatically."""
+        cmd = PendingCommand(client_tag=b"A001", command="SELECT", args=b"INBOX")
+        assert cmd.timestamp > 0
+
+    def test_upstream_tag_defaults_to_none(self) -> None:
+        """upstream_tag should default to None."""
+        cmd = PendingCommand(client_tag=b"A001", command="SELECT", args=b"INBOX")
+        assert cmd.upstream_tag is None
+
+    def test_upstream_tag_can_be_set(self) -> None:
+        """upstream_tag should be settable."""
+        cmd = PendingCommand(
+            client_tag=b"A001", command="SELECT", args=b"INBOX", upstream_tag=b"P0001"
+        )
+        assert cmd.upstream_tag == b"P0001"
+
+
+class TestCommandTagTracker:
+    """Tests for CommandTagTracker."""
+
+    def test_initial_state(self) -> None:
+        """New tracker should be empty."""
+        tracker = CommandTagTracker()
+        assert tracker.pending_count == 0
+        assert tracker.pending_tags == frozenset()
+
+    def test_register_command(self) -> None:
+        """Should register a command and return PendingCommand."""
+        tracker = CommandTagTracker()
+        cmd = tracker.register_command(b"A001", "SELECT", b"INBOX")
+
+        assert isinstance(cmd, PendingCommand)
+        assert cmd.client_tag == b"A001"
+        assert cmd.command == "SELECT"
+        assert cmd.args == b"INBOX"
+        assert tracker.pending_count == 1
+
+    def test_register_multiple_commands(self) -> None:
+        """Should track multiple commands with different tags."""
+        tracker = CommandTagTracker()
+        tracker.register_command(b"A001", "SELECT", b"INBOX")
+        tracker.register_command(b"A002", "FETCH", b"1:* FLAGS")
+        tracker.register_command(b"A003", "NOOP", None)
+
+        assert tracker.pending_count == 3
+        assert tracker.pending_tags == frozenset({b"A001", b"A002", b"A003"})
+
+    def test_register_duplicate_tag_raises(self) -> None:
+        """Should raise ValueError for duplicate tag."""
+        tracker = CommandTagTracker()
+        tracker.register_command(b"A001", "SELECT", b"INBOX")
+
+        with pytest.raises(ValueError, match="Duplicate command tag"):
+            tracker.register_command(b"A001", "NOOP", None)
+
+    def test_has_pending(self) -> None:
+        """has_pending should return correct boolean."""
+        tracker = CommandTagTracker()
+        assert tracker.has_pending(b"A001") is False
+
+        tracker.register_command(b"A001", "SELECT", b"INBOX")
+        assert tracker.has_pending(b"A001") is True
+        assert tracker.has_pending(b"A002") is False
+
+    def test_get_pending(self) -> None:
+        """get_pending should return command or None."""
+        tracker = CommandTagTracker()
+        assert tracker.get_pending(b"A001") is None
+
+        tracker.register_command(b"A001", "SELECT", b"INBOX")
+        cmd = tracker.get_pending(b"A001")
+        assert cmd is not None
+        assert cmd.command == "SELECT"
+
+    def test_complete_command(self) -> None:
+        """complete_command should remove and return the command."""
+        tracker = CommandTagTracker()
+        tracker.register_command(b"A001", "SELECT", b"INBOX")
+
+        cmd = tracker.complete_command(b"A001")
+        assert cmd is not None
+        assert cmd.client_tag == b"A001"
+        assert tracker.pending_count == 0
+        assert tracker.has_pending(b"A001") is False
+
+    def test_complete_nonexistent_returns_none(self) -> None:
+        """complete_command should return None for unknown tag."""
+        tracker = CommandTagTracker()
+        cmd = tracker.complete_command(b"A999")
+        assert cmd is None
+
+    def test_generate_upstream_tag(self) -> None:
+        """generate_upstream_tag should produce unique tags."""
+        tracker = CommandTagTracker()
+
+        tag1 = tracker.generate_upstream_tag()
+        tag2 = tracker.generate_upstream_tag()
+        tag3 = tracker.generate_upstream_tag()
+
+        assert tag1 == b"P0001"
+        assert tag2 == b"P0002"
+        assert tag3 == b"P0003"
+        # All tags should be unique
+        assert len({tag1, tag2, tag3}) == 3
+
+    def test_clear_all(self) -> None:
+        """clear_all should remove all pending commands."""
+        tracker = CommandTagTracker()
+        tracker.register_command(b"A001", "SELECT", b"INBOX")
+        tracker.register_command(b"A002", "FETCH", b"1:* FLAGS")
+
+        count = tracker.clear_all()
+        assert count == 2
+        assert tracker.pending_count == 0
+
+    def test_clear_all_empty(self) -> None:
+        """clear_all on empty tracker should return 0."""
+        tracker = CommandTagTracker()
+        count = tracker.clear_all()
+        assert count == 0
+
+
+class TestIMAPServerProtocolTagTracking:
+    """Tests for tag tracking integration in IMAPServerProtocol."""
+
+    def test_protocol_has_tag_tracker(self) -> None:
+        """Protocol should have a tag_tracker property."""
+        proto = IMAPServerProtocol()  # type: ignore[no-untyped-call]
+        assert isinstance(proto.tag_tracker, CommandTagTracker)
+
+    def test_each_protocol_has_own_tracker(self) -> None:
+        """Each protocol instance should have its own tracker."""
+        proto1 = IMAPServerProtocol()  # type: ignore[no-untyped-call]
+        proto2 = IMAPServerProtocol()  # type: ignore[no-untyped-call]
+
+        proto1.tag_tracker.register_command(b"A001", "SELECT", b"INBOX")
+
+        assert proto1.tag_tracker.pending_count == 1
+        assert proto2.tag_tracker.pending_count == 0
