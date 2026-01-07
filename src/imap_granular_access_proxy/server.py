@@ -7,6 +7,7 @@ client connections on a configurable port using Twisted's IMAP4 framework.
 from __future__ import annotations
 
 import logging
+from enum import Enum
 from typing import Any
 
 from twisted.internet.protocol import Factory, connectionDone
@@ -14,6 +15,24 @@ from twisted.mail import imap4
 from twisted.python.failure import Failure
 
 logger = logging.getLogger(__name__)
+
+
+class IMAPState(Enum):
+    """IMAP connection states as defined in RFC 3501.
+
+    The IMAP protocol defines four states:
+    - NOT_AUTHENTICATED: Initial state after connection
+    - AUTHENTICATED: After successful LOGIN/AUTHENTICATE
+    - SELECTED: After successful SELECT/EXAMINE of a mailbox
+    - LOGOUT: Connection is being terminated
+    - TIMEOUT: Connection timed out (Twisted-specific)
+    """
+
+    NOT_AUTHENTICATED = "unauth"
+    AUTHENTICATED = "auth"
+    SELECTED = "select"
+    LOGOUT = "logout"
+    TIMEOUT = "timeout"
 
 
 class IMAPServerProtocol(imap4.IMAP4Server):
@@ -24,6 +43,25 @@ class IMAPServerProtocol(imap4.IMAP4Server):
     """
 
     factory: IMAPServerFactory
+    _selected_mailbox: str | None = None
+
+    @property
+    def imap_state(self) -> IMAPState:
+        """Get the current IMAP connection state as a typed enum.
+
+        Returns:
+            The current IMAPState based on Twisted's internal state string.
+        """
+        return IMAPState(self.state)
+
+    @property
+    def selected_mailbox(self) -> str | None:
+        """Get the currently selected mailbox name, if any.
+
+        Returns:
+            The mailbox name if in SELECTED state, None otherwise.
+        """
+        return self._selected_mailbox
 
     def connectionMade(self) -> None:
         """Called when a client connects."""
@@ -48,6 +86,53 @@ class IMAPServerProtocol(imap4.IMAP4Server):
         """Called when sending a line to the client."""
         logger.debug("Sending: %r", line)
         super().sendLine(line)
+
+    def dispatchCommand(
+        self, tag: bytes, cmd: bytes, rest: bytes | None, uid: int | None = None
+    ) -> None:
+        """Dispatch an IMAP command after parsing.
+
+        This is the interception point for ACL checks. The command has been
+        parsed by Twisted and we can inspect/block it before execution.
+
+        Args:
+            tag: The command tag (e.g., b"A001")
+            cmd: The command name in uppercase (e.g., b"SELECT")
+            rest: The remaining arguments, or None
+            uid: UID prefix flag for UID commands
+        """
+        cmd_str = cmd.decode("ascii", errors="replace")
+        logger.debug(
+            "Command: tag=%r cmd=%s args=%r state=%s",
+            tag,
+            cmd_str,
+            rest,
+            self.imap_state.name,
+        )
+
+        # Hook point for ACL checks - subclasses or future code can
+        # override check_command() to implement access control
+        if not self.check_command(tag, cmd_str, rest):
+            return  # Command was rejected
+
+        super().dispatchCommand(tag, cmd, rest, uid)
+
+    def check_command(self, tag: bytes, cmd: str, args: bytes | None) -> bool:
+        """Check if a command should be allowed.
+
+        Override this method to implement ACL checks. Return False to
+        reject the command (and send an appropriate error response).
+
+        Args:
+            tag: The command tag
+            cmd: The command name in uppercase
+            args: The command arguments, or None
+
+        Returns:
+            True to allow the command, False to reject it.
+        """
+        # Default: allow all commands (ACL logic will be added later)
+        return True
 
 
 class IMAPServerFactory(Factory):
