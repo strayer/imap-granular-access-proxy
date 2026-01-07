@@ -12,6 +12,11 @@ bd close <id>         # Complete work
 bd sync               # Sync with git
 ```
 
+## Workflow Rules
+
+1. **Context Loading:** Before starting ANY task, you must read `GOALS.md` (or the relevant spec file) to understand the requirements. Do not guess implementation details.
+2. **Task Pick-up:** When you pick a task with `bd ready`, read the issue description. If the description is empty, check `GOALS.md` for the section matching the task title.
+
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
@@ -33,8 +38,8 @@ bd sync               # Sync with git
 7. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
+
 - Work is NOT complete until `git push` succeeds
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
-
