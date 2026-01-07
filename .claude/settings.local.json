@@ -10,7 +10,8 @@
       "Bash(.venv/bin/pytest tests/ -v)",
       "Bash(.venv/bin/mypy:*)",
       "Bash(bd search:*)",
-      "Bash(.venv/bin/ty check:*)"
+      "Bash(.venv/bin/ty check:*)",
+      "Bash(bd close:*)"
     ]
   },
   "enabledPlugins": {
